@@ -47,24 +47,33 @@ class ISISQueue:
         for msg in self.queue:
             if msg.MessageID == msg_id:
                 self.queue.remove(msg)
-        self.feedback_table.pop(msg_id)
+                self.feedback_table.pop(msg_id)
         self.sort()
 
     def deliver(self):
-        if len(self.queue) != 0 and self.queue[-1].deliverable:
+        delivered_msg = []
+        while len(self.queue) != 0 and self.queue[-1].deliverable:
             self.feedback_table.pop(self.queue[-1].MessageID)
-            return self.queue.pop(-1)
-        return -1
+            delivered_msg.append(self.queue.pop(-1))
+        return delivered_msg
+
+    # deliver used when failure happens
+    def deliver_fail(self, node_name):
+        delivered_msg = []
+        while len(self.queue) != 0 and self.queue[-1].:
+            self.feedback_table.pop(self.queue[-1].MessageID)
+            delivered_msg.append(self.queue.pop(-1))
+        return delivered_msg
 
     def update_priority(self, new_msg, node_num, node_name):
         agreed_priority = -1
         l = self.feedback_table[new_msg.MessageID]
-        l[0] += 1 # update seen time
+        l[0] += 1 # update receiving time
         # if it is feedback info
         if msg.SenderNodeName == node_name:
             l[1] = max(l[1], new_msg.priority)
-        # if it is the agreed priority
-        if l[0] == len(node_num)+1:
+        # if it is the agreed priority (receiving time == number of nodes)
+        if l[0] == len(node_num) + 1:
             for msg in self.queue:
                 if msg.MessageID == new_msg.MessageID:
                     msg.priority = max(l[1], msg.priority)
@@ -74,13 +83,6 @@ class ISISQueue:
                     break
         return agreed_priority
 
-    # def update_msg_priority(self, msg_id, priority):
-    #     for msg in self.queue:
-    #         if msg.MessageID == msg_id:
-    #             msg.priority = max(priority, msg.priority)
-    #             self.sort()
-    #             break
-
 
 isis_q = ISISQueue()
 seen_msg = set()
@@ -89,7 +91,9 @@ receive_socket = dict()
 prop_priority = 0
 
 isis_q_lock = threading.Lock()
+seen_msg_lock = threading.Lock()
 send_socket_lock = threading.Lock()
+receive_socket_lock = threading.Lock()
 prop_priority_lock = threading.Lock()
 
 
@@ -101,28 +105,33 @@ def receive_message(s, node_name):
             msg = Message(s.recv().decode('utf-8'))
             # based on whether I have seen this message
             if msg in seen_msg:
-                # TODO 这里还有一个问题就是R-muticast也会受到一样的消息
-                # if I have seen the message, then I am the sender, so I am receiving the feedback
-                # 每个进程都会见到包n次 所以都可以由update priority来判断
+                # if I have seen the message, I could either be
+                #   sender who get the feedback from other nodes or
+                #   receiver who get msg from other nodes' R-multicast
+                # But no matter whether I am sender or receiver, I will meet a msg n times, (n is the number of the node)
+                # and I will get the agreed priority of this msg when I meet the msg at nth time
                 isis_q_lock.acquire()
-                agreed_priority = isis_q.update_priority(msg, len(receive_socket), node_name) # TODO lock for receive_socket should be considered here
+                receive_socket_lock.acquire()
+                agreed_priority = isis_q.update_priority(msg, len(receive_socket), node_name)
+                receive_socket_lock.release()
                 if agreed_priority != -1:
                     deliver()
+                prop_priority_lock.acquire()
                 prop_priority = max(prop_priority, agreed_priority)
+                prop_priority_lock.release()
                 isis_q_lock.release()
             else:
-                # if I have never seen this message, then I am not the sender, then there are two options
-                # optionA: I will deliver it and then multicast it
-                        # then every process knows my proposed priority, then can decide their own agreed priority for this message
-                # optionB: (traditional ISIS algorithm) I will unicast to the sender, and then I will wait for the sender to multicast
-                #          the agreed priority (take the maximum from all feedback), so if you want to do this, just have another if else
-                #          in this function and see if the incoming message is sender's final decision of agreed priority
-                # then why not use optionA? just call multicast again (with the cost of more bandwidth, but who cares...)
-                # TODO 要改priority
+                # if I have never seen this message, then I am not the sender,
+                # I will deliver it and then multicast it
+                # then every process knows my proposed priority, then can decide their own agreed priority for this message
+                prop_priority_lock.acquire()
                 prop_priority += 1
-                msg.priority = (prop_priority, node_name) #TODO
+                msg.priority[0] = (prop_priority, node_name)
+                prop_priority_lock.release()
                 seen_msg.add(msg)
+                isis_q_lock.acquire()
                 isis_q.append(msg)
+                isis_q_lock.release()
                 multicast(msg)
         except:
             receive_socket.pop(s)
@@ -137,12 +146,17 @@ def get_events(node_name):
         msg.SenderNodeName = node_name
         msg.Content = line
         msg.MessageID = node_name
+        prop_priority_lock.acquire()
         prop_priority += 1
-        msg.priority = (prop_priority, node_name) #TODO
+        msg.priority = (prop_priority, node_name)
+        prop_priority_lock.release()
         # register this message to some data structure to show that I have seen this message
+        seen_msg_lock.acquire()
         seen_msg.add(msg)
+        seen_msg_lock.release()
+        isis_q_lock.acquire()
         isis_q.append(msg)
-        # deliver(msg)
+        isis_q_lock.release()
         multicast(msg)
 
 def update_balances(queue_head_message):
@@ -152,20 +166,11 @@ def update_balances(queue_head_message):
     pass
 
 def deliver():
-    # TODO
-    # if msg in seen_msg:
-    # # if I have seen this message, but I have not receive the feedback for this message's sending node
-    # #     then I am going to update the largest priority number I have ever received for this message
-    # #     and also update the order of the queue
-
-    # else:
-    # # if I have never seen this message, register it to some dict or map, append it to holdback queue, reorder
-    #     seen_msg.add(msg)
-    while True:
-        delivered_msg = isis_q.deliver()
-        if delivered_msg == -1:
-            break
-        update_balances(delivered_msg.Content)
+    delivered_msg = isis_q.deliver()
+    if len(delivered_msg) == 0:
+        return
+    for msg in delivered_msg:
+        update_balances(msg.Content)
 
 def multicast(msg):
     for n in send_socket:
