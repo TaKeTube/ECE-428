@@ -3,8 +3,6 @@ import sys
 import socket
 import threading
 
-from sympy import true
-
 # print(sys.argv)
 
 class Message:
@@ -58,12 +56,19 @@ class ISISQueue:
         return delivered_msg
 
     # deliver used when failure happens
-    def deliver_fail(self, node_name):
-        delivered_msg = []
-        while len(self.queue) != 0 and self.queue[-1].:
-            self.feedback_table.pop(self.queue[-1].MessageID)
-            delivered_msg.append(self.queue.pop(-1))
-        return delivered_msg
+    # def deliver_fail(self, node_num):
+    #     delivered_msg = []
+    #     while len(self.queue) != 0 and self.feedback_table[self.queue[-1].MessageID] == len(node_num) + 1:
+    #         self.feedback_table.pop(self.queue[-1].MessageID)
+    #         delivered_msg.append(self.queue.pop(-1))
+    #     return delivered_msg
+
+    # update deliverability according to current node number
+    def update_deliverability(self, node_num):
+        for msg in self.queue():
+            if self.feedback_table[msg.MessageID] == len(node_num) + 1:
+                msg.deliverable = True
+        return
 
     def update_priority(self, new_msg, node_num, node_name):
         agreed_priority = -1
@@ -87,7 +92,7 @@ class ISISQueue:
 isis_q = ISISQueue()
 seen_msg = set()
 send_socket = dict()
-receive_socket = dict()
+receive_socket = set()
 prop_priority = 0
 
 isis_q_lock = threading.Lock()
@@ -134,8 +139,15 @@ def receive_message(s, node_name):
                 isis_q_lock.release()
                 multicast(msg)
         except:
-            receive_socket.pop(s)
+            receive_socket_lock.acquire()
+            receive_socket.remove(s)
+            node_num = len(receive_socket)
+            receive_socket_lock.release()
             s.close()
+            isis_q_lock.acquire()
+            isis_q.update_deliverability(node_num)
+            deliver()
+            isis_q_lock.release()
             break
 
 def get_events(node_name):
@@ -181,20 +193,15 @@ def multicast(msg):
             # delete this connection
             send_socket_lock.acquire()
             send_socket.pop(n)
+            node_num = len(send_socket)
             send_socket_lock.release()
             # close this socket
             n.close()
             # run deliver_queue_head() because a node is dead, maybe the queue's head don't have to wait for feedback
-            # TODO
-            deliver_queue_head()
-
-def deliver_queue_head():
-    # # check if the head of the queue has the reply from all the messages
-    # # eg. 
-    # if num_delivered(queue.head()) == len(connection_list) + 1: # +1 mean self delivery
-    #     update_balances(queue.head())
-    #     # delete that message from queue 
-    pass
+            isis_q_lock.acquire()
+            isis_q.update_deliverability(node_num)
+            deliver()
+            isis_q_lock.release()
 
 def node_connect(id, addr, port):
     while True:
@@ -240,7 +247,7 @@ def main():
     s.listen(64)
     while len(receive_socket) != node_num:
         sock, addr = s.accept()
-        receive_socket.append(sock)
+        receive_socket.add(sock)
 
     # check whether all nodes are connected
     while True:
