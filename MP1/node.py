@@ -3,6 +3,8 @@ import sys
 import socket
 import threading
 
+from yaml import parse
+
 # print(sys.argv)
 
 class Message:
@@ -93,14 +95,15 @@ isis_q = ISISQueue()
 seen_msg = set()
 send_socket = dict()
 receive_socket = set()
+balance_record = dict()
 prop_priority = 0
 
 isis_q_lock = threading.Lock()
 seen_msg_lock = threading.Lock()
 send_socket_lock = threading.Lock()
 receive_socket_lock = threading.Lock()
+balance_record_lock = threading.Lock()
 prop_priority_lock = threading.Lock()
-
 
 def receive_message(s, node_name):
     # write code to wait until all the nodes are connected
@@ -171,11 +174,46 @@ def get_events(node_name):
         isis_q_lock.release()
         multicast(msg)
 
-def update_balances(queue_head_message):
-    # TODO
-    # some code
-    print_balances()
-    pass
+def update_balances(msg_text):
+    parsed_msg = msg_text.split()
+    operation = parsed_msg[0]
+
+    if operation == "DEPOSIT":
+        account = parsed_msg[1]
+        fund = int(parsed_msg[2])
+        balance_record_lock.acquire()
+        if account in balance_record:
+            balance_record[account] += fund
+        else:
+            balance_record[account] = fund
+        balance_record_lock.release()
+    elif operation == "TRANSFER":
+        source = parsed_msg[1]
+        destination = parsed_msg[3]
+        fund = int(parsed_msg[4])
+        if source not in balance_record:
+            print("Source account does not exist!")
+            return
+        balance_record_lock.acquire()
+        if balance_record[source] < fund:
+            print("Invalid transaction! Source account does not have enough balance.")
+            return
+        balance_record[source] -= fund
+        if destination in balance_record:
+            balance_record[destination] += fund
+        else:
+            balance_record[destination] = fund
+        balance_record_lock.release()
+    else:
+        print("Invalid message!")
+        return
+    
+    balance_msg = "BALANCE"
+    balance_record_lock.acquire()
+    for account in balance_record:
+        balance_msg += " %s:%d"%(account, balance_record[account])
+    balance_record_lock.release()
+    print(balance_msg)
 
 def deliver():
     delivered_msg = isis_q.deliver()
