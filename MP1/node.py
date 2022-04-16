@@ -1,31 +1,33 @@
-from ast import Try
-import sys 
+import sys
+import time
 import socket
 import threading
 
-from yaml import parse
-
 # print(sys.argv)
+
+MSG_SIZE = 256
 
 class Message:
     def __init__(self):
         self.SenderNodeName = ""
         self.Content = ""
-        self.MessageID = ""   # id = node name + message timestamp when sending
-        self.priority = (0, "")  # the priority
+        self.MessageID = ""
+        self.priority = (0, "")
         self.deliverable = False
 
-    def __init__(self, msg_str):
+    def set(self, msg_str):
         msg_list = msg_str.split('|')
         self.SenderNodeName = msg_list[0]
         self.Content = msg_list[1]
-        self.MessageID = msg_list[2]
-        self.priority = (msg_list[3], msg_list[0])
+        self.MessageID = msg_list[2]    # id = node name + message timestamp when sending
+        self.priority = msg_list[3]     # the priority
         self.deliverable = False
 
     def get_message_string(self):
         # convert the class to string message so that you can send via network
-        return "%s|%s|%s|%s" %(self.SenderNodeName, self.Content, self.MessageID, self.priority)
+        info_str = "%s|%s|%s|%s" %(self.SenderNodeName, self.Content, self.MessageID, self.priority)
+        return info_str+"\0"*(MSG_SIZE-len(info_str))
+
 
 def msg_sort_key(msg):
     return msg.priority
@@ -67,7 +69,7 @@ class ISISQueue:
 
     # update deliverability according to current node number
     def update_deliverability(self, node_num):
-        for msg in self.queue():
+        for msg in self.queue:
             if self.feedback_table[msg.MessageID] == len(node_num) + 1:
                 msg.deliverable = True
         return
@@ -77,7 +79,7 @@ class ISISQueue:
         l = self.feedback_table[new_msg.MessageID]
         l[0] += 1 # update receiving time
         # if it is feedback info
-        if msg.SenderNodeName == node_name:
+        if new_msg.SenderNodeName == node_name:
             l[1] = max(l[1], new_msg.priority)
         # if it is the agreed priority (receiving time == number of nodes)
         if l[0] == len(node_num) + 1:
@@ -106,68 +108,84 @@ balance_record_lock = threading.Lock()
 prop_priority_lock = threading.Lock()
 
 def receive_message(s, node_name):
+    global isis_q
+    global seen_msg
+    global receive_socket
+    global prop_priority
     # write code to wait until all the nodes are connected
     while True:
-        try:
-            # use socket recv and than decode the message (eg. utf-8)
-            msg = Message(s.recv().decode('utf-8'))
-            # based on whether I have seen this message
-            if msg in seen_msg:
-                # if I have seen the message, I could either be
-                #   sender who get the feedback from other nodes or
-                #   receiver who get msg from other nodes' R-multicast
-                # But no matter whether I am sender or receiver, I will meet a msg n times, (n is the number of the node)
-                # and I will get the agreed priority of this msg when I meet the msg at nth time
-                isis_q_lock.acquire()
-                receive_socket_lock.acquire()
-                agreed_priority = isis_q.update_priority(msg, len(receive_socket), node_name)
-                receive_socket_lock.release()
-                if agreed_priority != -1:
-                    deliver()
-                prop_priority_lock.acquire()
-                prop_priority = max(prop_priority, agreed_priority)
-                prop_priority_lock.release()
-                isis_q_lock.release()
-            else:
-                # if I have never seen this message, then I am not the sender,
-                # I will deliver it and then multicast it
-                # then every process knows my proposed priority, then can decide their own agreed priority for this message
-                prop_priority_lock.acquire()
-                prop_priority += 1
-                msg.priority[0] = (prop_priority, node_name)
-                prop_priority_lock.release()
-                seen_msg.add(msg)
-                isis_q_lock.acquire()
-                isis_q.append(msg)
-                isis_q_lock.release()
-                multicast(msg)
-        except:
-            receive_socket_lock.acquire()
-            receive_socket.remove(s)
-            node_num = len(receive_socket)
-            receive_socket_lock.release()
-            s.close()
-            isis_q_lock.acquire()
-            isis_q.update_deliverability(node_num)
-            deliver()
-            isis_q_lock.release()
+        # use socket recv and than decode the message (eg. utf-8)
+        data = s.recv(MSG_SIZE).decode('utf-8')
+        if not data:
             break
+        while len(data) < MSG_SIZE:
+            data += s.recv(MSG_SIZE-len(data)).decode('utf-8')
+        
+        msg = Message()
+        msg.set(data.strip('\0'))
+        # based on whether I have seen this message
+        seen_msg_lock.acquire()
+        if msg.MessageID in seen_msg:
+            seen_msg_lock.release()
+            # if I have seen the message, I could either be
+            #   sender who get the feedback from other nodes or
+            #   receiver who get msg from other nodes' R-multicast
+            # But no matter whether I am sender or receiver, I will meet a msg n times, (n is the number of the node)
+            # and I will get the agreed priority of this msg when I meet the msg at nth time
+            isis_q_lock.acquire()
+            receive_socket_lock.acquire()
+            agreed_priority = isis_q.update_priority(msg, len(receive_socket), node_name)
+            receive_socket_lock.release()
+            if agreed_priority != -1:
+                deliver()
+            prop_priority_lock.acquire()
+            prop_priority = max(prop_priority, agreed_priority)
+            prop_priority_lock.release()
+            isis_q_lock.release()
+        else:
+            # if I have never seen this message, then I am not the sender,
+            # I will deliver it and then multicast it
+            # then every process knows my proposed priority, then can decide their own agreed priority for this message
+            prop_priority_lock.acquire()
+            prop_priority += 1
+            msg.priority = (prop_priority, node_name)
+            prop_priority_lock.release()
+            seen_msg.add(msg.MessageID)
+            seen_msg_lock.release()
+            isis_q_lock.acquire()
+            isis_q.append(msg)
+            isis_q_lock.release()
+            multicast(msg)
+
+    receive_socket_lock.acquire()
+    receive_socket.remove(s)
+    node_num = len(receive_socket)
+    receive_socket_lock.release()
+    s.close()
+    isis_q_lock.acquire()
+    isis_q.update_deliverability(node_num)
+    deliver()
+    isis_q_lock.release()
+    return
 
 def get_events(node_name):
+    global isis_q
+    global seen_msg
+    global prop_priority
     # write code to wait until all the nodes are connected 
     for line in sys.stdin:
         # init the message struct
         msg = Message()
         msg.SenderNodeName = node_name
         msg.Content = line
-        msg.MessageID = node_name
+        msg.MessageID = node_name + str(time.time())
         prop_priority_lock.acquire()
         prop_priority += 1
         msg.priority = (prop_priority, node_name)
         prop_priority_lock.release()
         # register this message to some data structure to show that I have seen this message
         seen_msg_lock.acquire()
-        seen_msg.add(msg)
+        seen_msg.add(msg.MessageID)
         seen_msg_lock.release()
         isis_q_lock.acquire()
         isis_q.append(msg)
@@ -175,6 +193,8 @@ def get_events(node_name):
         multicast(msg)
 
 def update_balances(msg_text):
+    global balance_record
+
     parsed_msg = msg_text.split()
     operation = parsed_msg[0]
 
@@ -216,6 +236,7 @@ def update_balances(msg_text):
     print(balance_msg)
 
 def deliver():
+    global isis_q
     delivered_msg = isis_q.deliver()
     if len(delivered_msg) == 0:
         return
@@ -223,6 +244,8 @@ def deliver():
         update_balances(msg.Content)
 
 def multicast(msg):
+    global isis_q
+    global send_socket
     for n in send_socket:
         # send message, check if it has error
         s = send_socket[n]
@@ -242,6 +265,7 @@ def multicast(msg):
             isis_q_lock.release()
 
 def node_connect(id, addr, port):
+    global send_socket
     while True:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -249,6 +273,7 @@ def node_connect(id, addr, port):
             send_socket_lock.acquire()
             send_socket[id] = s
             send_socket_lock.release()
+            break
         except:
             continue
 
@@ -263,6 +288,8 @@ def read_config(filename):
     return node_num, node_info
 
 def main():
+    global receive_socket
+
     if len(sys.argv) != 4:
         print('Incorrect input arguments')
         sys.exit(0)
@@ -289,20 +316,22 @@ def main():
 
     # check whether all nodes are connected
     while True:
-        send_socket_lock.acquire()
+        # send_socket_lock.acquire()
         if len(send_socket) == node_num:
-            send_socket_lock.release()
+            # send_socket_lock.release()
             break
-        send_socket_lock.release()
+        # send_socket_lock.release()
 
     # start receiving message
     for ss in receive_socket:
-        receive_t = threading.Thread(target=receive_message, args=s)
+        receive_t = threading.Thread(target=receive_message, args=(ss, node_name))
         receive_t.start()
-    
+
     # start sending message
-    send_t = threading.Thread(target=get_events(node_name))
-    send_t.start()
+    # send_t = threading.Thread(target=get_events(node_name))
+    # send_t.start()
+    while True:
+        get_events(node_name)
 
 if __name__ == "__main__":
     main()
