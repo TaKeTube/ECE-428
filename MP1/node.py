@@ -144,6 +144,7 @@ def receive_message(s, node_name):
             receive_socket_lock.release()
             if agreed_priority != -1:
                 deliver()
+                isis_q_lock.release()
                 prop_priority_lock.acquire()
                 prop_priority = max(prop_priority, agreed_priority[0])
                 prop_priority_lock.release()
@@ -151,6 +152,7 @@ def receive_message(s, node_name):
                     # sender have decided the agreed priority right now, multicast the agreed priority
                     msg.priority = agreed_priority
                     multicast(msg)
+                continue
             isis_q_lock.release()
         else:
             # if I have never seen this message, then I am not the sender,
@@ -240,7 +242,8 @@ def update_balances(msg_text):
     
     balance_msg = "BALANCE"
     balance_record_lock.acquire()
-    for account in balance_record:
+    sorted_accounts = sorted(balance_record.keys())
+    for account in sorted_accounts:
         balance_msg += " %s:%d"%(account, balance_record[account])
     balance_record_lock.release()
     print(balance_msg)
@@ -256,7 +259,7 @@ def deliver():
 def multicast(msg):
     global isis_q
     global send_socket
-    for n in send_socket:
+    for n in send_socket.copy():
         # send message, check if it has error
         s = send_socket[n]
         try:
@@ -268,7 +271,7 @@ def multicast(msg):
             node_num = len(send_socket)
             send_socket_lock.release()
             # close this socket
-            n.close()
+            s.close()
             # run deliver_queue_head() because a node is dead, maybe the queue's head don't have to wait for feedback
             isis_q_lock.acquire()
             isis_q.update_deliverability(node_num)
