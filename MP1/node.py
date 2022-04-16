@@ -20,7 +20,7 @@ class Message:
         self.SenderNodeName = msg_list[0]
         self.Content = msg_list[1]
         self.MessageID = msg_list[2]    # id = node name + message timestamp when sending
-        self.priority = msg_list[3]     # the priority
+        self.priority = eval(msg_list[3])     # the priority
         self.deliverable = False
 
     def get_message_string(self):
@@ -39,6 +39,12 @@ class ISISQueue:
 
     def sort(self):
         self.queue.sort(key=msg_sort_key, reverse=True)
+
+    def print(self):
+        print("======HEAD======")
+        for msg in self.queue:
+            print(msg.get_message_string().strip('\0')+'|'+str(msg.deliverable))
+        print("======TAIL======")
 
     def append(self, msg):
         self.queue.append(msg)
@@ -62,7 +68,7 @@ class ISISQueue:
     # deliver used when failure happens
     # def deliver_fail(self, node_num):
     #     delivered_msg = []
-    #     while len(self.queue) != 0 and self.feedback_table[self.queue[-1].MessageID] == len(node_num) + 1:
+    #     while len(self.queue) != 0 and self.feedback_table[self.queue[-1].MessageID] == node_num + 1:
     #         self.feedback_table.pop(self.queue[-1].MessageID)
     #         delivered_msg.append(self.queue.pop(-1))
     #     return delivered_msg
@@ -70,7 +76,7 @@ class ISISQueue:
     # update deliverability according to current node number
     def update_deliverability(self, node_num):
         for msg in self.queue:
-            if self.feedback_table[msg.MessageID] == len(node_num) + 1:
+            if self.feedback_table[msg.MessageID] == node_num + 1:
                 msg.deliverable = True
         return
 
@@ -82,7 +88,7 @@ class ISISQueue:
         if new_msg.SenderNodeName == node_name:
             l[1] = max(l[1], new_msg.priority)
         # if it is the agreed priority (receiving time == number of nodes)
-        if l[0] == len(node_num) + 1:
+        if l[0] == node_num + 1:
             for msg in self.queue:
                 if msg.MessageID == new_msg.MessageID:
                     msg.priority = max(l[1], msg.priority)
@@ -138,9 +144,13 @@ def receive_message(s, node_name):
             receive_socket_lock.release()
             if agreed_priority != -1:
                 deliver()
-            prop_priority_lock.acquire()
-            prop_priority = max(prop_priority, agreed_priority)
-            prop_priority_lock.release()
+                prop_priority_lock.acquire()
+                prop_priority = max(prop_priority, agreed_priority[0])
+                prop_priority_lock.release()
+                if node_name == msg.SenderNodeName:
+                    # sender have decided the agreed priority right now, multicast the agreed priority
+                    msg.priority = agreed_priority
+                    multicast(msg)
             isis_q_lock.release()
         else:
             # if I have never seen this message, then I am not the sender,
@@ -177,7 +187,7 @@ def get_events(node_name):
         # init the message struct
         msg = Message()
         msg.SenderNodeName = node_name
-        msg.Content = line
+        msg.Content = line.strip()
         msg.MessageID = node_name + str(time.time())
         prop_priority_lock.acquire()
         prop_priority += 1
@@ -249,8 +259,9 @@ def multicast(msg):
     for n in send_socket:
         # send message, check if it has error
         s = send_socket[n]
-        res = s.send(msg.get_message_string().encode("utf-8"))
-        if not res:
+        try:
+            s.send(msg.get_message_string().encode("utf-8"))
+        except:
             # delete this connection
             send_socket_lock.acquire()
             send_socket.pop(n)
