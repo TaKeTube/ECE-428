@@ -2,6 +2,7 @@ import sys
 import time
 import socket
 import threading
+from matplotlib import pyplot as plt
 
 # print(sys.argv)
 
@@ -105,6 +106,11 @@ send_socket = dict()
 receive_socket = set()
 balance_record = dict()
 prop_priority = 0
+bw_counter = 0
+bw_logger = []
+time_logger = []
+node_terminate = False
+delay_logger = dict()
 
 isis_q_lock = threading.Lock()
 seen_msg_lock = threading.Lock()
@@ -112,20 +118,28 @@ send_socket_lock = threading.Lock()
 receive_socket_lock = threading.Lock()
 balance_record_lock = threading.Lock()
 prop_priority_lock = threading.Lock()
+bw_counter_lock = threading.Lock()
+delay_logger_lock = threading.Lock()
 
 def receive_message(s, node_name):
     global isis_q
     global seen_msg
     global receive_socket
     global prop_priority
+    global bw_counter
     # write code to wait until all the nodes are connected
-    while True:
+    while not node_terminate:
         # use socket recv and than decode the message (eg. utf-8)
         data = s.recv(MSG_SIZE).decode('utf-8')
         if not data:
             break
         while len(data) < MSG_SIZE:
             data += s.recv(MSG_SIZE-len(data)).decode('utf-8')
+
+        # record bandwidth
+        bw_counter_lock.acquire()
+        bw_counter += len(data)
+        bw_counter_lock.release()
         
         msg = Message()
         msg.set(data.strip('\0'))
@@ -151,6 +165,9 @@ def receive_message(s, node_name):
                 if node_name == msg.SenderNodeName:
                     # sender have decided the agreed priority right now, multicast the agreed priority
                     msg.priority = agreed_priority
+                    delay_logger_lock.acquire()
+                    delay_logger[msg.MessageID].append(time.time())
+                    delay_logger_lock.release()
                     multicast(msg)
                 continue
             isis_q_lock.release()
@@ -163,10 +180,10 @@ def receive_message(s, node_name):
             msg.priority = (prop_priority, node_name)
             prop_priority_lock.release()
             seen_msg.add(msg.MessageID)
-            seen_msg_lock.release()
             isis_q_lock.acquire()
             isis_q.append(msg)
             isis_q_lock.release()
+            seen_msg_lock.release()
             multicast(msg)
 
     receive_socket_lock.acquire()
@@ -202,6 +219,9 @@ def get_events(node_name):
         isis_q_lock.acquire()
         isis_q.append(msg)
         isis_q_lock.release()
+        delay_logger_lock.acquire()
+        delay_logger[msg.MessageID] = [time.time()]
+        delay_logger_lock.release()
         multicast(msg)
 
 def update_balances(msg_text):
@@ -229,6 +249,7 @@ def update_balances(msg_text):
         balance_record_lock.acquire()
         if balance_record[source] < fund:
             print("Invalid transaction! Source account does not have enough balance.")
+            balance_record_lock.release()
             return
         balance_record[source] -= fund
         if destination in balance_record:
@@ -301,8 +322,25 @@ def read_config(filename):
         node_info.append(info)
     return node_num, node_info
 
+def bandwidth_logger(interval):
+    global bw_counter
+    global bw_logger
+    
+    start_time = time.time()
+    time_logger.append(0)
+    while not node_terminate:
+        time.sleep(interval)
+        curr_time = time.time() - start_time
+        time_diff = curr_time - time_logger[-1]
+        time_logger.append(curr_time)
+        bw_counter_lock.acquire()
+        bw_logger.append(bw_counter/time_diff)
+        bw_counter = 0
+        bw_counter_lock.release()
+
 def main():
     global receive_socket
+    global node_terminate
 
     if len(sys.argv) != 4:
         print('Incorrect input arguments')
@@ -341,11 +379,42 @@ def main():
         receive_t = threading.Thread(target=receive_message, args=(ss, node_name))
         receive_t.start()
 
+    interval = 1
+    show_figure = True
+    bw_log = threading.Thread(target=bandwidth_logger, args=(interval,))
+    bw_log.start()
+
     # start sending message
     # send_t = threading.Thread(target=get_events(node_name))
     # send_t.start()
     while True:
-        get_events(node_name)
+        try:
+            get_events(node_name)
+        except:
+            node_terminate = True
+            sorted_msg_id = sorted(delay_logger, key = lambda x:delay_logger[x][0])
+            msg_delay = []
+            for msg in sorted_msg_id:
+                if len(delay_logger[msg]) == 2:
+                    msg_delay.append(delay_logger[msg][1]-delay_logger[msg][0])
+
+            plt.figure(figsize=(6,10))
+            # plot bandwidth
+            bw_fig = plt.subplot(211)
+            bw_fig.plot(time_logger[1:], bw_logger)
+            bw_fig.set_title("Bandwidth for "+node_name)
+            bw_fig.set_xlabel("Time / s")
+            bw_fig.set_ylabel("Bandwidth / Byte/s")
+            # plot message processing delay
+            delay_fig = plt.subplot(212)
+            delay_fig.plot(list(range(len(msg_delay))),msg_delay)
+            delay_fig.set_title("Message processing delay for "+node_name)
+            delay_fig.set_xlabel("Message ID")
+            delay_fig.set_ylabel("Delay / s")
+            plt.savefig("./result/%s.png"%(node_name))
+            if show_figure:
+                plt.show()
+            break
 
 if __name__ == "__main__":
     main()
