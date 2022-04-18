@@ -128,7 +128,7 @@ def receive_message(s, node_name):
     global prop_priority
     global bw_counter
     # write code to wait until all the nodes are connected
-    while not node_terminate:
+    while True:
         # use socket recv and than decode the message (eg. utf-8)
         data = s.recv(MSG_SIZE).decode('utf-8')
         if not data:
@@ -282,10 +282,18 @@ def multicast(msg):
     global send_socket
     for n in send_socket.copy():
         # send message, check if it has error
+        need_close = False
+        if n not in send_socket:
+            continue
         s = send_socket[n]
         try:
-            s.send(msg.get_message_string().encode("utf-8"))
+            numbyte = s.send(msg.get_message_string().encode("utf-8"))
+            if numbyte == 0:
+                need_close = True
         except:
+            need_close = True
+
+        if need_close:
             # delete this connection
             send_socket_lock.acquire()
             send_socket.pop(n)
