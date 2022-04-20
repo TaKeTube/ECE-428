@@ -15,6 +15,7 @@ class Message:
         self.MessageID = ""
         self.priority = (0, "")
         self.deliverable = False
+        self.needMulticast = False
 
     def set(self, msg_str):
         msg_list = msg_str.split('|')
@@ -66,23 +67,23 @@ class ISISQueue:
             delivered_msg.append(self.queue.pop(-1))
         return delivered_msg
 
-    # deliver used when failure happens
-    # def deliver_fail(self, node_num):
-    #     delivered_msg = []
-    #     while len(self.queue) != 0 and self.feedback_table[self.queue[-1].MessageID] == node_num + 1:
-    #         self.feedback_table.pop(self.queue[-1].MessageID)
-    #         delivered_msg.append(self.queue.pop(-1))
-    #     return delivered_msg
-
     # update deliverability according to current node number
-    def update_deliverability(self, node_num):
+    def update_deliverability(self, node_num, node_name):
         for msg in self.queue:
-            if self.feedback_table[msg.MessageID] == node_num + 1:
+            if self.feedback_table[msg.MessageID][0] == node_num + 1:
                 msg.deliverable = True
+                # if it is the feedback msg, update its priority as the agreed priority
+                # then the node will multicast the msg with the agreed priority
+                if msg.SenderNodeName == node_name:
+                    l = self.feedback_table[msg.MessageID]
+                    msg.priority = max(l[1], msg.priority)
+                    msg.needMulticast = True
         return
 
     def update_priority(self, new_msg, node_num, node_name):
         agreed_priority = -1
+        if new_msg.MessageID not in self.feedback_table:
+            return agreed_priority
         l = self.feedback_table[new_msg.MessageID]
         l[0] += 1 # update receiving time
         # if it is feedback info
@@ -128,7 +129,7 @@ def receive_message(s, node_name):
     global prop_priority
     global bw_counter
     # write code to wait until all the nodes are connected
-    while True:
+    while not node_terminate:
         # use socket recv and than decode the message (eg. utf-8)
         data = s.recv(MSG_SIZE).decode('utf-8')
         if not data:
@@ -168,7 +169,7 @@ def receive_message(s, node_name):
                     delay_logger_lock.acquire()
                     delay_logger[msg.MessageID].append(time.time())
                     delay_logger_lock.release()
-                    multicast(msg)
+                    multicast(msg, node_name)
                 continue
             isis_q_lock.release()
         else:
@@ -184,17 +185,14 @@ def receive_message(s, node_name):
             isis_q.append(msg)
             isis_q_lock.release()
             seen_msg_lock.release()
-            multicast(msg)
+            multicast(msg, node_name)
 
     receive_socket_lock.acquire()
     receive_socket.remove(s)
     node_num = len(receive_socket)
-    receive_socket_lock.release()
     s.close()
-    isis_q_lock.acquire()
-    isis_q.update_deliverability(node_num)
-    deliver()
-    isis_q_lock.release()
+    fail_handler(node_num, node_name)
+    receive_socket_lock.release()
     return
 
 def get_events(node_name):
@@ -222,7 +220,7 @@ def get_events(node_name):
         delay_logger_lock.acquire()
         delay_logger[msg.MessageID] = [time.time()]
         delay_logger_lock.release()
-        multicast(msg)
+        multicast(msg, node_name)
 
 def update_balances(msg_text):
     global balance_record
@@ -272,12 +270,21 @@ def update_balances(msg_text):
 def deliver():
     global isis_q
     delivered_msg = isis_q.deliver()
+    multicast_msg = []
     if len(delivered_msg) == 0:
         return
     for msg in delivered_msg:
         update_balances(msg.Content)
+        if msg.needMulticast:
+            multicast_msg.append(msg)
+    # multicast agreed priority for feedback msgs that changed their deliverability when some nodes failed
+    for msg in multicast_msg:
+        delay_logger_lock.acquire()
+        delay_logger[msg.MessageID].append(time.time())
+        delay_logger_lock.release()
+        multicast_without_check(msg)
 
-def multicast(msg):
+def multicast(msg, node_name):
     global isis_q
     global send_socket
     for n in send_socket.copy():
@@ -298,14 +305,29 @@ def multicast(msg):
             send_socket_lock.acquire()
             send_socket.pop(n)
             node_num = len(send_socket)
-            send_socket_lock.release()
             # close this socket
             s.close()
-            # run deliver_queue_head() because a node is dead, maybe the queue's head don't have to wait for feedback
-            isis_q_lock.acquire()
-            isis_q.update_deliverability(node_num)
-            deliver()
-            isis_q_lock.release()
+            fail_handler(node_num, node_name)
+            send_socket_lock.release()
+
+def fail_handler(node_num, node_name):
+    # run deliver_queue_head() because a node is dead, maybe the queue's head don't have to wait for feedback
+    isis_q_lock.acquire()
+    isis_q.update_deliverability(node_num, node_name)
+    deliver()
+    isis_q_lock.release()
+
+def multicast_without_check(msg):
+    global send_socket
+    for n in send_socket.copy():
+        # send message, check if it has error
+        if n not in send_socket:
+            continue
+        s = send_socket[n]
+        try:
+            s.send(msg.get_message_string().encode("utf-8"))
+        except:
+            continue
 
 def node_connect(id, addr, port):
     global send_socket
@@ -388,7 +410,7 @@ def main():
         receive_t.start()
 
     interval = 1
-    show_figure = True
+    show_figure = False
     bw_log = threading.Thread(target=bandwidth_logger, args=(interval,))
     bw_log.start()
 
