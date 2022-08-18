@@ -8,11 +8,11 @@ The project is based on [ECE 428](https://ece.illinois.edu/academics/courses/ece
 
 System Start:
 
-![start](.\start.gif)
+![start](https://github.com/TaKeTube/ECE-428/blob/main/MP1/start.gif?raw=true)
 
 Failure Handling:
 
-![failure_handling](.\failure_handling.gif)
+![failure_handling](https://github.com/TaKeTube/ECE-428/blob/main/MP1/failure_handling.gif?raw=true)
 
 ### Run Instruction
 
