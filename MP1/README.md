@@ -1,4 +1,4 @@
-## Distributed Transaction System in Total Order
+# Distributed Transaction System in Total Order
 
 ### Overview
 
