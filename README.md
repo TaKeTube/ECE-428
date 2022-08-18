@@ -1,2 +1,2 @@
 # ECE-428
-ECE 438 - Distributed Systems - Machine Problems
+:cloud: ECE 428 - Distributed Systems - Machine Problems
